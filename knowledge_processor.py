@@ -30,7 +30,9 @@ from pathlib import Path
 
 from typing import Callable, Iterable, List
 
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
+
+from tools.image import AssetManager
 
 DEFAULT_FEATURE_LIBRARY = {
 
@@ -69,7 +71,6 @@ DEFAULT_FEATURE_LIBRARY = {
         "专属福利",
 
     ],
-
     "domains": [
 
         "amazon.",
@@ -97,7 +98,6 @@ DEFAULT_FEATURE_LIBRARY = {
         "promo.",
 
     ],
-
     "cta_patterns": [
 
         r"点击.*?(领取|购买|查看|获取|下载)",
@@ -111,7 +111,6 @@ DEFAULT_FEATURE_LIBRARY = {
         r"关注.*?(公众号|账号)",
 
     ],
-
     "line_patterns": [
 
         r"^\s*在看点这里.*$",
@@ -125,7 +124,6 @@ DEFAULT_FEATURE_LIBRARY = {
         r"^\s*获取方式[:：].*$",
 
     ],
-
     "multiline_patterns": [
 
         r"<!--\s*ad\s*-->[\s\S]*?<!--\s*/ad\s*-->",
@@ -139,8 +137,8 @@ HTML_AD_BLOCK_RE = re.compile(r"<!--\s*ad\s*-->[\s\S]*?<!--\s*/ad\s*-->", re.IGN
 SEPARATOR_RE = re.compile(r"^-{10,}\s*$")
 
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
-
-MD_LINK_RE = re.compile(r"!?\[[^\]]*]\(([^)]*)\)")
+# 非贪婪匹配
+MD_LINK_RE = re.compile(r"!?\[([^\]]*?)\]\(([^)]+?)\)")
 
 
 def _parse_simple_yaml_feature_library(raw_text: str) -> dict:
@@ -200,6 +198,13 @@ class ProcessStats:
     cleaned_files: int = 0
 
     skipped_files: int = 0
+
+    def merge(self, other: "ProcessStats"):
+        """补全：合并统计数据"""
+        self.scanned_files += other.scanned_files
+        self.converted_files += other.converted_files
+        self.cleaned_files += other.cleaned_files
+        self.skipped_files += other.skipped_files
 
 
 @dataclass
@@ -351,14 +356,15 @@ class CompiledFeatureLibrary:
 
         )
 
+# --- HTML/PDF 转换逻辑 ---
 
 class SimpleHTMLToMarkdown(HTMLParser):
     """A small HTML -> markdown converter based on stdlib parser."""
 
-    def __init__(self, image_rewriter: Callable[[str], str] | None = None) -> None:
+    def __init__(self, asset_mgr: AssetManager, image_rewriter: Callable[[str], str] | None = None) -> None:
 
         super().__init__()
-
+        self.asset_mgr = asset_mgr
         self.parts: List[str] = []
 
         self.current_link: str | None = None
@@ -378,10 +384,7 @@ class SimpleHTMLToMarkdown(HTMLParser):
         attrs_dict = dict(attrs)
 
         if tag in {"h1", "h2", "h3", "h4"}:
-
-            level = int(tag[1])
-
-            self.parts.append("\n" + "#" * level + " ")
+            self.parts.append(f"\n{'#' * int(tag[1])} ")
 
         elif tag == "blockquote":
 
@@ -420,9 +423,7 @@ class SimpleHTMLToMarkdown(HTMLParser):
             self.current_link_text = []
 
         elif tag == "img":
-
-            src = attrs_dict.get("src") or ""
-
+            src = unquote(attrs_dict.get("src", "")).replace("\\", "/")
             alt = attrs_dict.get("alt") or "image"
 
             if self.image_rewriter is not None:
@@ -559,10 +560,8 @@ def convert_html_to_markdown(
     return parser.markdown()
 
 
-def _is_remote_or_data_url(value: str) -> bool:
-    parsed = urlparse(value)
-
-    return parsed.scheme in {"http", "https", "data"}
+def _is_remote_or_data_url(url: str) -> bool:
+    return any(url.startswith(s) for s in ["http", "https", "data:"])
 
 
 def _strip_query_and_fragment(value: str) -> str:
@@ -581,7 +580,7 @@ def build_html_image_rewriter(
         target_md: Path,
 
         dry_run: bool,
-
+        asset_mgr: AssetManager,
         logger: logging.Logger,
 
 ) -> Callable[[str], str]:
@@ -622,16 +621,26 @@ def build_html_image_rewriter(
 
         destination = assets_dir / target_name
 
-        counter = 1
+        # 默认使用hash逻辑
+        model = 'hash'
+        if model == 'add_num':
+            '''
+            追加序号模式：如果目标目录同名文件已存在则追加序号
+            '''
+            counter = 1
+            while destination.exists() and destination.resolve() != src_path.resolve():
+                destination = assets_dir / f"{src_path.stem}_{counter}{src_path.suffix}"
+                counter += 1
+            # 3. 计算 Markdown 中的相对引用路径
+            # 结果类似于 "文件所在目录/assets/image.png"
+            relative_ref = posixpath.join(assets_dir.name, destination.name)
+        elif model == 'hash':
+            '''
+            hash模式：如果该 Hash 已存在，直接复用，否则，复制文件。如果同名但内容不同则追加序号
+            '''
+            relative_ref = asset_mgr.migrate_file(destination)
 
-        while destination.exists() and destination.resolve() != src_path.resolve():
-            destination = assets_dir / f"{src_path.stem}_{counter}{src_path.suffix}"
 
-            counter += 1
-
-        # 3. 计算 Markdown 中的相对引用路径
-        # 结果类似于 "文件所在目录/assets/image.png"
-        relative_ref = posixpath.join(assets_dir.name, destination.name)
 
         copied_map[src_path] = relative_ref
 
@@ -660,7 +669,15 @@ def _safe_print(message: str) -> None:
     print(text)
 
 
-def convert_pdf_to_markdown(pdf_path: Path) -> str:
+def convert_pdf_to_markdown(pdf_path: Path, asset_mgr: AssetManager) -> str:
+    """
+    提取 PDF 文本并尝试导出嵌入图片
+
+    pdf_path: PDF文件路径
+    asset_mgr: 图片管理器
+    return: 转换后的Markdown文本
+    
+    """
     try:
 
         from pypdf import PdfReader  # type: ignore
@@ -675,18 +692,28 @@ def convert_pdf_to_markdown(pdf_path: Path) -> str:
 
     reader = PdfReader(str(pdf_path))
 
-    pages = []
+    pages_content = []
+    img_count = 0
 
-    for page in reader.pages:
-
+    for i, page in enumerate(reader.pages):
+        # 1. 提取文本
         text = page.extract_text() or ""
+        pages_content.append(text)
 
-        text = text.strip()
+        # 2. 提取图片 (pypdf 3.0+)
+        for img_file in page.images:
+            img_count += 1
+            # 将内存图片临时写入，通过 AssetManager 统一哈希管理
+            temp_name = f"pdf_extract_{pdf_path.stem}_p{i}_{img_count}_{img_file.name}"
+            with open(temp_name, "wb") as f:
+                f.write(img_file.data)
 
-        if text:
-            pages.append(text)
+            p_temp = Path(temp_name)
+            rel_path = asset_mgr.migrate_file(p_temp)
+            pages_content.append(f"\n![pdf_img_{img_count}]({rel_path})\n")
+            p_temp.unlink()  # 删除临时文件
 
-    return "\n\n".join(pages).strip() + "\n" if pages else ""
+    return "\n\n".join(pages_content)
 
 
 def _line_contains_ad_link(line: str, feature_library: FeatureLibrary) -> bool:
@@ -850,6 +877,7 @@ def _iter_markdown_files(base_dir: Path, recursive: bool = True) -> Iterable[Pat
         if path.is_file() and path.suffix.lower() in {".md", ".markdown"}:
             yield path
 
+# --- 核心处理器 ---
 
 def convert_directory(
 
@@ -864,7 +892,6 @@ def convert_directory(
         dry_run: bool = False,
 
 ) -> ProcessStats:
-
     '''
     转换目录下，所有pdf、html、htm文件，并保存到输出目录下（如果输出目录为空，则保存到当前目录）
     directory: 输入目录
@@ -875,9 +902,10 @@ def convert_directory(
     return: 统计信息
     '''
 
-
     stats = ProcessStats()
-
+    # 统一管理输出目录下的 assets
+    target_base = output_dir if output_dir else directory
+    asset_mgr = AssetManager(target_base / "assets", dry_run)
     logger = logging.getLogger("knowledge_processor")
     # 如果有输出目录，确保它存在
     if output_dir:
@@ -889,13 +917,14 @@ def convert_directory(
 
         suffix = src_path.suffix.lower()
         target_md = get_target_path(src_path, directory, output_dir)
-        
+
         # 确保目标子目录存在
         if not dry_run:
             target_md.parent.mkdir(parents=True, exist_ok=True)
 
         logger.info("开始转换文件: %s", src_path)
 
+        raw_markdown:str = None
         try:
 
             if suffix in {".html", ".htm"}:
@@ -903,16 +932,14 @@ def convert_directory(
                 html_content = src_path.read_text(encoding="utf-8", errors="ignore")
 
                 image_rewriter = build_html_image_rewriter(
-
-                    html_path=src_path, target_md=target_md, dry_run=dry_run, logger=logger
-
+                    html_path=src_path, target_md=target_md, dry_run=dry_run, asset_mgr=asset_mgr, logger=logger
                 )
 
                 raw_markdown = convert_html_to_markdown(html_content, image_rewriter=image_rewriter)
 
             else:
-
-                raw_markdown = convert_pdf_to_markdown(src_path)
+                # pdf转换
+                raw_markdown = convert_pdf_to_markdown(src_path, asset_mgr)
 
             stats.converted_files += 1
 
@@ -920,16 +947,14 @@ def convert_directory(
 
             stats.skipped_files += 1
 
-            logger.exception("转换失败（依赖问题）: %s", src_path)
+            logger.error(f"转换失败（依赖问题）: {src_path}")
 
             continue
 
-        except Exception:
+        except Exception as e:
 
             stats.skipped_files += 1
-
-            logger.exception("转换失败: %s", src_path)
-
+            logging.error(f"转换处理失败 {src_path}: {e}")
             continue
 
         if dry_run:
@@ -948,9 +973,7 @@ def convert_directory(
 
             shutil.copy2(target_md, backup_path)
 
-        current = target_md.read_text(encoding="utf-8") if target_md.exists() else ""
-
-        if raw_markdown != current:
+        if raw_markdown != None:
 
             target_md.write_text(raw_markdown, encoding="utf-8")
 
@@ -958,38 +981,40 @@ def convert_directory(
 
             logger.info("写入转换结果: %s", target_md)
 
-            _safe_print(f"[convert] 已写入: {target_md}")
+            _safe_print(f"[convert] 转换成功: {target_md}")
 
         else:
 
-            _safe_print(f"[convert] 无变化: {target_md}")
+            _safe_print(f"[convert] 失败: {src_path}")
 
     return stats
 
 
 def migrate_markdown_assets(content: str, old_md_path: Path, new_md_path: Path):
     """在纯清洗模式下，寻找并迁移 MD 里的本地图片"""
+
     def replace_asset(match):
         alt_text = match.group(1)
         src = match.group(2)
-        
+
         if _is_remote_or_data_url(src):
             return match.group(0)
-            
+
         old_asset_path = (old_md_path.parent / src).resolve()
         if old_asset_path.exists() and old_asset_path.is_file():
             new_assets_dir = new_md_path.parent / f"{new_md_path.stem}_assets"
             new_assets_dir.mkdir(parents=True, exist_ok=True)
-            
+
             new_asset_path = new_assets_dir / old_asset_path.name
             shutil.copy2(old_asset_path, new_asset_path)
-            
+
             # 返回相对于新 MD 的新路径
             return f"![{alt_text}]({new_assets_dir.name}/{new_asset_path.name})"
         return match.group(0)
 
     # 匹配 ![alt](src)
     return re.sub(r"!\[(.*?)\]\((.*?)\)", replace_asset, content)
+
 
 def clean_directory(
 
@@ -1000,14 +1025,27 @@ def clean_directory(
         backup: bool = False,
 
         dry_run: bool = False,
-
+        output_dir: Path | None = None,
         feature_library_file: Path | None = None,
 
 ) -> ProcessStats:
+    '''
+    清洗目录下，所有markdown文件，并保存到输出目录下（如果输出目录为空，则保存到当前目录）
+    注意：如果是 pipeline，清洗的目录应该是 output_dir
+    directory: 输入目录
+    recursive: 是否递归
+    output_dir: 输出目录,如果为空，则保存到当前目录
+    backup: 是否备份,当清洗结果与原文件不同时，才备份
+    dry_run: 是否仅输出将发生的变更，不实际写入
+    feature_library_file: 广告特征库路径，支持 JSON/YAML
+    return: 统计信息
+    '''
     stats = ProcessStats()
 
     logger = logging.getLogger("knowledge_processor")
-
+    # 如果有输出目录，确保它存在
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
     feature_library = FeatureLibrary.from_file(feature_library_file)
 
     compiled_feature_library = CompiledFeatureLibrary.from_feature_library(feature_library)
@@ -1044,9 +1082,8 @@ def clean_directory(
 
             continue
 
-        if backup:
+        if cleaned != original and backup:
             backup_path = md_path.with_suffix(md_path.suffix + ".bak")
-
             shutil.copy2(md_path, backup_path)
 
         md_path.write_text(cleaned, encoding="utf-8")
@@ -1073,6 +1110,15 @@ def process_directory(
         feature_library_file: Path | None = None,
 
 ) -> ProcessStats:
+    '''
+    串联处理目录下，所有pdf、html、htm文件，并保存到输出目录下（如果输出目录为空，则保存到当前目录）
+    directory: 输入目录
+    recursive: 是否递归
+    backup: 是否备份
+    dry_run: 是否仅输出将发生的变更，不实际写入
+    feature_library_file: 广告特征库路径，支持 JSON/YAML
+    return: 统计信息
+    '''
     convert_stats = convert_directory(
 
         directory=directory, recursive=recursive, backup=backup, dry_run=dry_run
@@ -1111,21 +1157,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("directory", help="待处理目录")
 
-    parser.add_argument(
-
-        "--mode",
-
-        choices=("convert", "clean", "pipeline"),
-
-        default="pipeline",
-
-        help="convert=仅格式转换, clean=仅广告净化, pipeline=先转再净化",
-
-    )
-
     parser.add_argument("--no-recursive", dest="recursive", action="store_false", help="仅处理当前目录")
 
     parser.add_argument("--workers", type=int, default=4, help="并行线程数")
+    parser.add_argument("--mode", choices=("convert", "clean", "pipeline"), default="pipeline", help="convert=仅格式转换, clean=仅广告净化, pipeline=先转再净化")
     parser.add_argument("--output", "-o", type=str, help="指定生成结果的输出目录，如果为空，则保存到当前目录")
     parser.add_argument("--backup", action="store_true", help="写入前备份已有 md 文件")
 
@@ -1205,17 +1240,17 @@ def setup_logging(log_file: str) -> Path:
 
 # --- Main & Execution ---
 
-
+# --- CLI 入口 ---
 def main() -> None:
     parser = build_cli_parser()
 
     args = parser.parse_args()
 
     directory = Path(args.directory)
+    output_dir = Path(args.output_dir)
 
     if not directory.exists() or not directory.is_dir():
         raise SystemExit(f"目录不存在: {directory}")
-
     log_path = setup_logging(args.log_file)
 
     logger = logging.getLogger("knowledge_processor")
@@ -1226,9 +1261,10 @@ def main() -> None:
 
     feature_library_path = Path(args.feature_library) if args.feature_library else None
 
-    if args.mode == "convert":
+    stats = ProcessStats()
+    if args.mode in {"convert", "pipeline"}:
 
-        stats = convert_directory(
+        convert_stats = convert_directory(
 
             directory=directory,
 
@@ -1237,40 +1273,43 @@ def main() -> None:
             backup=args.backup,
 
             dry_run=args.dry_run,
+            output_dir=output_dir
 
         )
+        stats.merge(convert_stats)
 
-    elif args.mode == "clean":
+    if args.mode in {"clean", "pipeline"}:
+        # 注意：如果是 pipeline，清洗的目录应该是 output_dir
+        clean_stats = clean_directory(
 
-        stats = clean_directory(
-
-            directory=directory,
+            directory=args.mode == "pipeline" and output_dir or directory,
 
             recursive=args.recursive,
 
             backup=args.backup,
 
             dry_run=args.dry_run,
-
+            output_dir= output_dir,
             feature_library_file=feature_library_path,
 
         )
+        stats.merge(clean_stats)
+    # else:
 
-    else:
+    #     process_stats = process_directory(
 
-        stats = process_directory(
+    #         directory=directory,
 
-            directory=directory,
+    #         recursive=args.recursive,
 
-            recursive=args.recursive,
+    #         backup=args.backup,
 
-            backup=args.backup,
+    #         dry_run=args.dry_run,
 
-            dry_run=args.dry_run,
+    #         feature_library_file=feature_library_path,
 
-            feature_library_file=feature_library_path,
-
-        )
+    #     )
+    #     stats.merge(process_stats)
 
     _safe_print(
 
