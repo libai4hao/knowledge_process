@@ -1,0 +1,17 @@
+.idea/
+*.iml
+cookies.json
+.python-version
+.history
+__pycache__
+test-pull
+logs
+.vscode
+build
+dist
+*.spec
+wine
+xiaobai
+.DS_Store
+.venv/
+youdaonote/

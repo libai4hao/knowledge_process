@@ -1,0 +1,6 @@
+# 所有文本文件在检出时统一为 LF，提交时统一为 LF
+* text=auto eol=lf
+
+# 特定文件类型强制声明
+*.jpg binary
+*.png binary
