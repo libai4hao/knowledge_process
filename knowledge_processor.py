@@ -107,7 +107,7 @@ def _parse_simple_yaml_feature_library(raw_text: str) -> dict:
         if line.startswith("- ") and current_key is not None:
             value = line[2:].strip()
             if (value.startswith('"') and value.endswith('"')) or (
-                value.startswith("'") and value.endswith("'")
+                    value.startswith("'") and value.endswith("'")
             ):
                 value = value[1:-1]
             data["patterns"][current_key].append(value)
@@ -122,7 +122,7 @@ class ProcessStats:
     skipped_files: int = 0
 
     def merge(self, other: "ProcessStats"):
-        """补全：合并统计数据"""
+        """合并统计数据"""
         self.scanned_files += other.scanned_files
         self.converted_files += other.converted_files
         self.cleaned_files += other.cleaned_files
@@ -203,6 +203,7 @@ class CompiledFeatureLibrary:
                 re.compile(pattern, re.IGNORECASE) for pattern in feature_library.cta_patterns
             ),
         )
+
 
 # --- HTML/PDF 转换逻辑 ---
 
@@ -301,6 +302,7 @@ class SimpleHTMLToMarkdown(HTMLParser):
         content = re.sub(r"\n{3,}", "\n\n", content).strip()
         return content + "\n" if content else ""
 
+
 def get_target_path(src_path: Path, input_dir: Path, output_dir: Path | None) -> Path:
     """
     计算目标输出路径，确保路径不会无限叠加
@@ -323,10 +325,11 @@ def get_target_path(src_path: Path, input_dir: Path, output_dir: Path | None) ->
     target_path = output_dir / relative_path
     return target_path.with_suffix(".md")
 
+
 def convert_html_to_markdown(
-    html_content: str, image_rewriter: Callable[[str], str] | None = None
+        html_content: str, asset_mgr: AssetManager, image_rewriter: Callable[[str], str] | None = None
 ) -> str:
-    parser = SimpleHTMLToMarkdown(image_rewriter=image_rewriter)
+    parser = SimpleHTMLToMarkdown(image_rewriter=image_rewriter, asset_mgr=asset_mgr)
     parser.feed(html_content)
     return parser.markdown()
 
@@ -343,30 +346,30 @@ def _strip_query_and_fragment(value: str) -> str:
 
 
 def build_html_image_rewriter(
-    html_path: Path,
-    target_md: Path,
-    dry_run: bool,
-    asset_mgr: AssetManager,
-    logger: logging.Logger,
+        html_path: Path,
+        target_md: Path,
+        dry_run: bool,
+        asset_mgr: AssetManager,
+        logger: logging.Logger,
 ) -> Callable[[str], str]:
-    '''
+    """
     构建HTML图片重写器
     html_path: HTML文件路径
     target_md: 目标Markdown文件路径
     dry_run: 是否仅输出将发生的变更，不实际写入
     logger: 日志记录器
     return: 图片重写器
-    '''
+    """
     copied_map: dict[Path, str] = {}
     # 附件文件夹：始终与目标 MD 文件同级，命名为：文件所在目录/assets
     assets_dir = target_md.parent / "assets"
 
     def rewrite(src: str) -> str:
-        '''
+        """
         重写图片路径，如果不是本地图片则原样返回
         :param src:
         :return:
-        '''
+        """
         if not src or _is_remote_or_data_url(src):
             return src
         # 1. 找到原始图片的物理路径，并检查是否存在
@@ -482,8 +485,8 @@ def _line_contains_ad_link(line: str, feature_library: FeatureLibrary) -> bool:
 
 
 def _is_ad_line(
-    line: str,
-    compiled_feature_library: CompiledFeatureLibrary,
+        line: str,
+        compiled_feature_library: CompiledFeatureLibrary,
 ) -> bool:
     stripped = line.strip()
     if not stripped:
@@ -527,9 +530,9 @@ def _remove_duplicate_blocks_with_fingerprint(markdown_text: str) -> str:
 
 
 def clean_markdown_ads(
-    markdown_text: str,
-    feature_library: FeatureLibrary | None = None,
-    compiled_feature_library: CompiledFeatureLibrary | None = None,
+        markdown_text: str,
+        feature_library: FeatureLibrary | None = None,
+        compiled_feature_library: CompiledFeatureLibrary | None = None,
 ) -> str:
     if compiled_feature_library is None:
         feature_library = feature_library or FeatureLibrary.from_dict(DEFAULT_FEATURE_LIBRARY)
@@ -575,16 +578,17 @@ def _iter_markdown_files(base_dir: Path, recursive: bool = True) -> Iterable[Pat
         if path.is_file() and path.suffix.lower() in {".md", ".markdown"}:
             yield path
 
+
 # --- 核心处理器 ---
 
 def convert_directory(
-    directory: Path,
-    recursive: bool = True,
-    output_dir: Path | None = None,
-    backup: bool = False,
-    dry_run: bool = False,
+        directory: Path,
+        recursive: bool = True,
+        output_dir: Path | None = None,
+        backup: bool = False,
+        dry_run: bool = False,
 ) -> ProcessStats:
-    '''
+    """
     转换目录下，所有pdf、html、htm文件，并保存到输出目录下（如果输出目录为空，则保存到当前目录）
     directory: 输入目录
     recursive: 是否递归
@@ -592,7 +596,7 @@ def convert_directory(
     backup: 是否备份
     dry_run: 是否仅输出将发生的变更，不实际写入
     return: 统计信息
-    '''
+    """
 
     stats = ProcessStats()
     # 统一管理输出目录下的 assets
@@ -606,22 +610,22 @@ def convert_directory(
     for src_path in _iter_convert_files(directory, recursive=recursive):
         stats.scanned_files += 1
         suffix = src_path.suffix.lower()
-        #TODO  target_md = src_path.with_suffix(".md")
+        # TODO  target_md = src_path.with_suffix(".md")
 
         target_md = get_target_path(src_path, directory, output_dir)
         logger.info("开始转换文件: %s", src_path)
 
-        raw_markdown:str = None
+        raw_markdown: str = ''
         try:
             if suffix in {".html", ".htm"}:
                 html_content = src_path.read_text(encoding="utf-8", errors="ignore")
                 image_rewriter = build_html_image_rewriter(
                     html_path=src_path, target_md=target_md, dry_run=dry_run, asset_mgr=asset_mgr, logger=logger
                 )
-                raw_markdown = convert_html_to_markdown(html_content, image_rewriter=image_rewriter)
+                raw_markdown = convert_html_to_markdown(html_content=html_content, asset_mgr=asset_mgr, image_rewriter=image_rewriter)
             else:
                 # pdf转换
-                raw_markdown = convert_pdf_to_markdown(src_path, asset_mgr)
+                raw_markdown = convert_pdf_to_markdown(pdf_path=src_path, asset_mgr=asset_mgr)
             stats.converted_files += 1
         except RuntimeError:
             stats.skipped_files += 1
@@ -654,6 +658,7 @@ def convert_directory(
 
     return stats
 
+
 def migrate_markdown_assets(content: str, old_md_path: Path, new_md_path: Path):
     """在纯清洗模式下，寻找并迁移 MD 里的本地图片"""
 
@@ -679,15 +684,16 @@ def migrate_markdown_assets(content: str, old_md_path: Path, new_md_path: Path):
     # 匹配 ![alt](src)
     return re.sub(r"!\[(.*?)\]\((.*?)\)", replace_asset, content)
 
+
 def clean_directory(
-    directory: Path,
-    recursive: bool = True,
-    backup: bool = False,
-    output_dir: Path | None = None,
-    dry_run: bool = False,
-    feature_library_file: Path | None = None,
+        directory: Path,
+        recursive: bool = True,
+        backup: bool = False,
+        output_dir: Path | None = None,
+        dry_run: bool = False,
+        feature_library_file: Path | None = None,
 ) -> ProcessStats:
-    '''
+    """
     清洗目录下，所有markdown文件，并保存到输出目录下（如果输出目录为空，则保存到当前目录）
     注意：如果是 pipeline，清洗的目录应该是 output_dir
     directory: 输入目录
@@ -697,7 +703,7 @@ def clean_directory(
     dry_run: 是否仅输出将发生的变更，不实际写入
     feature_library_file: 广告特征库路径，支持 JSON/YAML
     return: 统计信息
-    '''
+    """
     stats = ProcessStats()
     logger = logging.getLogger("knowledge_processor")
     # 如果有输出目录，确保它存在
@@ -732,7 +738,7 @@ def clean_directory(
             # TODO 净化后的输出目录
             target_path = md_path
             # 如果有输出目录，确保它存在
-            target_path.mkdir(parents=True, exist_ok=True)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
             md_path = target_path
         md_path.write_text(cleaned, encoding="utf-8")
         stats.cleaned_files += 1
@@ -743,13 +749,13 @@ def clean_directory(
 
 
 def process_directory(
-    directory: Path,
-    recursive: bool = True,
-    backup: bool = False,
-    dry_run: bool = False,
-    feature_library_file: Path | None = None,
+        directory: Path,
+        recursive: bool = True,
+        backup: bool = False,
+        dry_run: bool = False,
+        feature_library_file: Path | None = None,
 ) -> ProcessStats:
-    '''
+    """
     串联处理目录下，所有pdf、html、htm文件，并保存到输出目录下（如果输出目录为空，则保存到当前目录）
     directory: 输入目录
     recursive: 是否递归
@@ -757,7 +763,7 @@ def process_directory(
     dry_run: 是否仅输出将发生的变更，不实际写入
     feature_library_file: 广告特征库路径，支持 JSON/YAML
     return: 统计信息
-    '''
+    """
     convert_stats = convert_directory(
         directory=directory, recursive=recursive, backup=backup, dry_run=dry_run
     )
@@ -840,7 +846,7 @@ def main() -> None:
     args = parser.parse_args()
 
     directory = Path(args.directory)
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output)
     if not directory.exists() or not directory.is_dir():
         raise SystemExit(f"目录不存在: {directory}")
 
@@ -851,6 +857,7 @@ def main() -> None:
 
     feature_library_path = Path(args.feature_library) if args.feature_library else None
     stats = ProcessStats()
+    # 1. 转换阶段
     if args.mode in {"convert", "pipeline"}:
         convert_stats = convert_directory(
             directory=directory,
@@ -860,7 +867,7 @@ def main() -> None:
             output_dir=output_dir
         )
         stats.merge(convert_stats)
-
+    # 2. 清洗阶段
     if args.mode in {"clean", "pipeline"}:
         # 注意：如果是 pipeline，清洗的目录应该是 output_dir
         clean_stats = clean_directory(
@@ -868,18 +875,10 @@ def main() -> None:
             recursive=args.recursive,
             backup=args.backup,
             dry_run=args.dry_run,
-            output_dir= output_dir,
+            output_dir=output_dir,
             feature_library_file=feature_library_path,
         )
         stats.merge(clean_stats)
-    # else:
-    #     stats = process_directory(
-    #         directory=directory,
-    #         recursive=args.recursive,
-    #         backup=args.backup,
-    #         dry_run=args.dry_run,
-    #         feature_library_file=feature_library_path,
-    #     )
 
     _safe_print(
         f"扫描: {stats.scanned_files}, 转换: {stats.converted_files}, "
